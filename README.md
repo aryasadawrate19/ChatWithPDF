@@ -1,4 +1,4 @@
-<div align="center"> <img src="https://github.com/your-repo/images/pdf-chatbot.png" alt="AskPDF logo" width="300"/> </div>
+<div align="center"> <img src="Logo.jpg" alt="AskPDF logo" width="300"/> </div>
 <div align="center">AskPDF: Chat with PDFs Using Langchain and Gemini API</div>
 <p align="center"> <img src="https://img.shields.io/badge/Python-3.8%2B-blue" alt="Python"> <img src="https://img.shields.io/badge/Streamlit-1.x-red" alt="Streamlit"> <img src="https://img.shields.io/badge/Langchain-0.0.x-brightgreen" alt="Langchain"> <img src="https://img.shields.io/badge/FAISS-v1.7-orange" alt="FAISS"> </p> 
 🚀 Overview
