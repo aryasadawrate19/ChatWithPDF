@@ -32,14 +32,13 @@ streamlit run app.py
 🎮 Usage
 <ol> <li><strong>Upload PDFs:</strong> Go to the sidebar and upload one or multiple PDFs. After upload, click <em>Submit & Process</em> to extract the text.</li> <li><strong>Ask Questions:</strong> In the main interface, type your question about the PDFs you uploaded. The bot will respond based on the content of the PDFs.</li> <li><strong>Receive Answers:</strong> The chatbot will answer based on the content available in the processed PDFs.</li> </ol>
 📁 File Structure
-plaintext
-Copy code
 .
 ├── app.py                    # Main Streamlit application
 ├── faiss_index/               # FAISS index directory
 ├── .env                       # Environment variables (not included in repo)
 ├── requirements.txt           # Project dependencies
 └── README.md                  # Project documentation
+
 🔧 Troubleshooting
 🛑 Common Issues
 FAISS Index Not Found:
