@@ -8,107 +8,224 @@ import google.generativeai as genai
 from langchain.vectorstores import FAISS
 from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
+import time
+from typing import List, Optional
+import logging
 
-# Load environment variables and configure Google Gemini API
-load_dotenv()
-API_KEY = os.getenv("GEMINI_API_KEY")
-if not API_KEY:
-    st.error("Google Gemini API key is missing. Please set it in your environment variables.")
-    st.stop()
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-genai.configure(api_key=API_KEY)
-
-
-def get_pdf_text(pdf_docs):
-    """Extract text from multiple PDF files."""
-    text = ""
-    for pdf in pdf_docs:
-        pdf_reader = PdfReader(pdf)
-        for page in pdf_reader.pages:
-            text += page.extract_text()
-    return text
+# Constants
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+CHUNK_SIZE = 10000
+CHUNK_OVERLAP = 1000
+TEMPERATURE = 0.3
 
 
-def get_text_chunks(text):
-    """Split the text into smaller chunks for better processing."""
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=1000)
-    chunks = text_splitter.split_text(text)
-    return chunks
+class PDFProcessor:
+    def __init__(self):
+        self._load_api_key()
+        self.embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+
+    def _load_api_key(self):
+        """Load and validate API key."""
+        load_dotenv()
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "Google Gemini API key is missing. Please set GEMINI_API_KEY in your environment variables.")
+        genai.configure(api_key=api_key)
+
+    def extract_text(self, pdf_docs: List[object]) -> str:
+        """Extract text from multiple PDF files."""
+        combined_text = []
+        for pdf in pdf_docs:
+            try:
+                pdf_reader = PdfReader(pdf)
+                for page in pdf_reader.pages:
+                    text = page.extract_text()
+                    if text:
+                        combined_text.append(text)
+            except Exception as e:
+                logger.error(f"Error processing PDF {pdf.name}: {str(e)}")
+                raise ValueError(f"Error processing PDF {pdf.name}: {str(e)}")
+
+        return "\n".join(combined_text)
+
+    def create_text_chunks(self, text: str) -> List[str]:
+        """Split text into manageable chunks."""
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=CHUNK_SIZE,
+            chunk_overlap=CHUNK_OVERLAP,
+            length_function=len
+        )
+        return splitter.split_text(text)
+
+    def create_vector_store(self, text_chunks: List[str]) -> None:
+        """Create and save vector store."""
+        vector_store = FAISS.from_texts(text_chunks, embedding=self.embeddings)
+        vector_store.save_local("faiss-index")
+
+    def load_vector_store(self) -> FAISS:
+        """Load the vector store from disk."""
+        return FAISS.load_local("faiss-index", self.embeddings, allow_dangerous_deserialization=True)
 
 
-def get_vector_store(text_chunks):
-    """Create a vector store for efficient similarity search."""
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
-    vector_store.save_local("faiss-index")
+class QASystem:
+    def __init__(self):
+        self.prompt_template = """
+        Answer the question as detailed as possible from the provided context. If the answer is not in the context,
+        respond with "I apologize, but I cannot find the answer to your question in the provided documents."
+        Please maintain a professional and helpful tone.
+
+        Context: {context}
+
+        Question: {question}
+
+        Answer:
+        """
+        self.model = ChatGoogleGenerativeAI(model="gemini-pro", temperature=TEMPERATURE)
+
+    def get_qa_chain(self):
+        """Create the question-answering chain."""
+        prompt = PromptTemplate(template=self.prompt_template,
+                                input_variables=["context", "question"])
+        return load_qa_chain(self.model, chain_type="stuff", prompt=prompt)
+
+    def generate_response(self, question: str, vector_store: FAISS) -> str:
+        """Generate response for user question."""
+        docs = vector_store.similarity_search(question)
+        chain = self.get_qa_chain()
+
+        try:
+            response = chain(
+                {"input_documents": docs, "question": question},
+                return_only_outputs=True
+            )
+            return response["output_text"]
+        except Exception as e:
+            logger.error(f"Error generating response: {str(e)}")
+            raise ValueError(f"Error generating response: {str(e)}")
 
 
-def get_conversational_chain():
-    """Create a QA chain using Google Gemini model."""
-    prompt_template = """
-    Answer the question as detailed as possible from the provided context, make sure to provide all the details,
-    if the answer is not in the provided context just say, "answer is not available in the context", don't provide the wrong answer.\n\n
-    Context:\n {context}?\n
-    Question: \n{question}\n
+class StreamlitApp:
+    def __init__(self):
+        self.pdf_processor = PDFProcessor()
+        self.qa_system = QASystem()
+        self.setup_streamlit()
 
-    Answer:
-    """
-    model = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.3)
-    prompts = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-    chain = load_qa_chain(model, chain_type="stuff", prompt=prompts)
-    return chain
+    def setup_streamlit(self):
+        """Configure Streamlit page settings."""
+        st.set_page_config(
+            page_title="PDF Chat Assistant",
+            page_icon="📚",
+            layout="wide"
+        )
+        st.header("💬 Chat with Your PDF Documents")
 
+    def validate_files(self, pdf_docs: List[object]) -> bool:
+        """Validate uploaded PDF files."""
+        if not pdf_docs:
+            return False
 
-def user_input(user_question):
-    """Handle user input and generate a response from the model."""
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    new_db = FAISS.load_local("faiss-index", embeddings, allow_dangerous_deserialization=True)
-    docs = new_db.similarity_search(user_question)
+        for pdf in pdf_docs:
+            if pdf.size > MAX_FILE_SIZE:
+                st.error(f"File {pdf.name} exceeds the 10MB size limit.")
+                return False
 
-    chain = get_conversational_chain()
-    try:
-        response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
-        st.write("Model: ", response["output_text"])
-    except Exception as e:
-        st.error(f"Error generating response from model: {str(e)}")
+            if not pdf.name.lower().endswith('.pdf'):
+                st.error(f"File {pdf.name} is not a PDF.")
+                return False
 
+        return True
 
-def main():
-    """Main function for the Streamlit app."""
-    st.set_page_config("ChatPDF")
-    st.header("Chat with PDFs")
+    def show_sidebar(self) -> Optional[List[object]]:
+        """Display and handle sidebar components."""
+        with st.sidebar:
+            st.title("📁 Document Upload")
+            pdf_docs = st.file_uploader(
+                "Upload your PDF files (10MB max per file)",
+                accept_multiple_files=True,
+                type="pdf"
+            )
 
-    user_question = st.text_input("Ask a question from the PDF files")
+            if pdf_docs and self.validate_files(pdf_docs):
+                st.write(f"📎 {len(pdf_docs)} file(s) uploaded successfully")
 
-    if user_question:
-        user_input(user_question)
+                if st.button("🔍 Process Documents", type="primary"):
+                    return pdf_docs
 
-    with st.sidebar:
-        st.title("Menu")
-        pdf_docs = st.file_uploader("Upload your PDF files", accept_multiple_files=True, type="pdf")
+            st.markdown("---")
+            st.markdown("### 📋 Instructions")
+            st.markdown("""
+            1. Upload one or more PDF files
+            2. Click 'Process Documents'
+            3. Ask questions about your documents
+            """)
 
+        return None
+
+    def process_pdfs(self, pdf_docs: List[object]) -> None:
+        """Process uploaded PDF files."""
+        with st.spinner("Processing documents..."):
+            try:
+                # Extract text from PDFs
+                raw_text = self.pdf_processor.extract_text(pdf_docs)
+                if not raw_text.strip():
+                    st.error("No readable text found in the uploaded PDFs.")
+                    return
+
+                # Create text chunks and vector store
+                text_chunks = self.pdf_processor.create_text_chunks(raw_text)
+                self.pdf_processor.create_vector_store(text_chunks)
+
+                st.success("✅ Documents processed successfully!")
+                st.session_state.docs_processed = True
+
+            except Exception as e:
+                st.error(f"Error processing documents: {str(e)}")
+                st.session_state.docs_processed = False
+
+    def handle_user_input(self, user_question: str) -> None:
+        """Process user questions and display responses."""
+        if not hasattr(st.session_state, 'docs_processed') or not st.session_state.docs_processed:
+            st.warning("Please upload and process documents first.")
+            return
+
+        try:
+            vector_store = self.pdf_processor.load_vector_store()
+            with st.spinner("Thinking..."):
+                response = self.qa_system.generate_response(user_question, vector_store)
+
+            st.write("🤖 Assistant:", response)
+
+        except Exception as e:
+            st.error(f"Error generating response: {str(e)}")
+
+    def run(self):
+        """Run the Streamlit application."""
+        # Initialize session state
+        if 'docs_processed' not in st.session_state:
+            st.session_state.docs_processed = False
+
+        # Handle file upload in sidebar
+        pdf_docs = self.show_sidebar()
         if pdf_docs:
-            if any(pdf.size > 10 * 1024 * 1024 for pdf in pdf_docs):
-                st.error("One or more files exceed the 10 MB size limit.")
+            self.process_pdfs(pdf_docs)
+
+        # Main chat interface
+        user_question = st.text_area("🤔 Ask a question about your documents:", height=100)
+        if st.button("Send", type="primary"):
+            if user_question:
+                self.handle_user_input(user_question)
             else:
-                st.write(f"Uploaded {len(pdf_docs)} PDF file(s).")
-
-            if st.button("Submit & Process"):
-                with st.spinner(f"Processing {len(pdf_docs)} PDF file(s)..."):
-                    try:
-                        raw_text = get_pdf_text(pdf_docs)
-                        if not raw_text.strip():
-                            st.error("The uploaded PDFs contain no readable text.")
-                            st.stop()
-
-                        text_chunks = get_text_chunks(raw_text)
-                        get_vector_store(text_chunks)
-                        st.success(f"Processing complete! {len(pdf_docs)} file(s) processed successfully.")
-                    except Exception as e:
-                        st.error(f"Error processing PDFs: {str(e)}")
-        else:
-            st.warning("Only PDF files are supported!", icon="⚠️")
+                st.warning("Please enter a question.")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        app = StreamlitApp()
+        app.run()
+    except Exception as e:
+        st.error(f"Application Error: {str(e)}")
